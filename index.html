@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TESLA STAR RADYOLOJİ MERKEZİ | Hasta ve Sonuç Takibi</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = { theme: { extend: {
+    fontFamily: { sans: ['Figtree','system-ui','sans-serif'] },
+    colors: { ink:'#0f2a33', teal:{50:'#eef8f7',100:'#d5eeeb',500:'#1a8f89',600:'#12746f',700:'#0f5c59',900:'#0b3a3c'} }
+  } } }
+</script>
+<style>
+  body{background:#f3f7f7}
+  .row-pending{border-left:4px solid #f59e0b}
+  .row-done{border-left:4px solid #16a34a}
+  .btn{transition:background .15s,color .15s}
+  :focus-visible{outline:2px solid #1a8f89;outline-offset:2px}
+</style>
+</head>
+<body class="font-sans text-ink">
+
+<script type="module">
+/* ==========================================================
+   FIREBASE AYARLARI — Firebase Console > Proje Ayarları >
+   "Web uygulaması ekle" ekranındaki değerleri buraya yapıştırın.
+   ========================================================== */
+const firebaseConfig = {
+  apiKey:            "AIzaSyADPkQmfIjgNJT2tkzRTR-JSE6hEnLrsKw",
+  authDomain:        "hasta-takip-sistemi-9d193.firebaseapp.com",
+  databaseURL:       "https://hasta-takip-sistemi-9d193-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId:         "hasta-takip-sistemi-9d193",
+  storageBucket:     "hasta-takip-sistemi-9d193.firebasestorage.app",
+  messagingSenderId: "301471973198",
+  appId:             "1:301471973198:web:b93b12df69fb67c778e81f",
+  measurementId:     "G-9DTP86PZ7F"
+};
+/* ========================================================== */
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, push, set, update, remove, onValue, serverTimestamp, query, orderByKey, orderByChild, startAt, endAt, limitToLast }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+const configured = !firebaseConfig.apiKey.startsWith("BURAYA");
+let db, patientsRef;
+if (configured) {
+  db = getDatabase(initializeApp(firebaseConfig));
+  patientsRef = ref(db, "patients");
+}
+
+/* Ekrana yüklenecek en yeni kayıt sayısı (indirme kotasını korur). İsterseniz artırabilirsiniz. */
+const KAYIT_LIMITI = 2000;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let patients = [], filter = "all", searchText = "";
+
+/* ---------- Toast ---------- */
+function toast(msg, bad) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg text-sm font-medium text-white shadow-lg " + (bad ? "bg-red-600" : "bg-teal-700");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add("hidden"), 2200);
+}
+
+/* ---------- Canlı dinleyici ---------- */
+let unsub = null, dayKey = new Date().toDateString();
+let preset = "today", custom = { from: "", to: "" };
+const DAY = 86400000;
+const day0 = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+const pend = () => filter === "wa" || filter === "mail";
+const fmt = ts => ts ? new Date(ts).toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "-";
+
+function getRange() {
+  const now = new Date(), t = day0(now);
+  switch (preset) {
+    case "today":     return [t, t + DAY - 1];
+    case "yesterday": return [t - DAY, t - 1];
+    case "week":      return [t - 6 * DAY, t + DAY - 1];
+    case "month":     return [new Date(now.getFullYear(), now.getMonth(), 1).getTime(), t + DAY - 1];
+    case "custom": {
+      const f = custom.from ? new Date(custom.from + "T00:00:00").getTime() : 0;
+      const e = custom.to ? new Date(custom.to + "T23:59:59.999").getTime() : t + DAY - 1;
+      return [f, e];
+    }
+    default: return null; // Tümü
+  }
+}
+const inRange = p => { const r = getRange(); return !r || (p.createdAt >= r[0] && p.createdAt <= r[1]); };
+
+/* Seçili tarih aralığını (veya bekleyen/tümü modunda en yeni kayıtları) Firebase'den canlı dinler */
+function subscribe() {
+  if (!configured) return;
+  if (unsub) unsub();
+  const r = getRange();
+  const q = (!r || pend())
+    ? query(patientsRef, orderByKey(), limitToLast(KAYIT_LIMITI))
+    : query(patientsRef, orderByChild("createdAt"), startAt(r[0]), endAt(r[1]));
+  unsub = onValue(q, snap => {
+    const v = snap.val() || {};
+    patients = Object.entries(v).map(([id, p]) => ({ ...p, id }))
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    $("live").className = "inline-flex items-center gap-2 text-sm text-teal-100";
+    $("live").innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>Canlı bağlantı';
+    render();
+  }, err => {
+    $("live").className = "inline-flex items-center gap-2 text-sm text-red-200";
+    $("live").innerHTML = "Hata: " + esc(err.message) + " (Firebase Rules sekmesini kontrol edin)";
+  });
+}
+
+if (configured) {
+  subscribe();
+  setInterval(() => { const k = new Date().toDateString(); if (k !== dayKey) { dayKey = k; subscribe(); render(); } }, 60000);
+  setTimeout(() => {
+    if (!$("live").textContent.includes("Canlı") && !$("live").textContent.includes("Hata"))
+      $("live").textContent = "Bağlanılamıyor: internet, reklam engelleyici veya Firebase ayarlarını kontrol edin (F12 → Console)";
+  }, 8000);
+} else {
+  $("warn").classList.remove("hidden");
+}
+
+/* ---------- Render ---------- */
+const isDone = p => p.whatsappSent && p.mailSent && p.doctorWhatsappSent && p.doctorMailSent;
+const waPending = p => !p.whatsappSent || !p.doctorWhatsappSent;
+const mailPending = p => !p.mailSent || !p.doctorMailSent;
+const tg = (act, label, on) => `<button data-act="${act}" class="btn px-3 py-1.5 rounded-lg text-sm font-semibold ${on ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200" : "bg-amber-100 text-amber-800 hover:bg-amber-200"}">${label}: ${on ? "Gönderildi" : "Bekliyor"}</button>`;
+function render() {
+  const scope = patients.filter(inRange);
+  $("kTotal").textContent = scope.length;
+  $("kWa").textContent = scope.filter(waPending).length;
+  $("kMail").textContent = scope.filter(mailPending).length;
+  $("kDone").textContent = scope.filter(isDone).length;
+
+  document.querySelectorAll("[data-filter]").forEach(b => {
+    const on = b.dataset.filter === filter;
+    b.className = "btn px-3 py-1.5 rounded-full text-sm font-semibold border " +
+      (on ? "bg-teal-700 text-white border-teal-700" : "bg-white text-teal-900 border-teal-100 hover:bg-teal-50");
+  });
+
+  document.querySelectorAll("[data-range]").forEach(b => {
+    const on = b.dataset.range === preset;
+    b.className = "btn px-3 py-1.5 rounded-full text-sm font-semibold border " +
+      (on ? "bg-teal-700 text-white border-teal-700" : "bg-white text-teal-900 border-teal-100 hover:bg-teal-50");
+  });
+
+  const q = searchText.trim().toLocaleLowerCase("tr");
+  const list = patients.filter(p => {
+    if (!pend() && !inRange(p)) return false;
+    if (q && ![p.fullName, p.doctorName, p.studyType].some(x => (x || "").toLocaleLowerCase("tr").includes(q))) return false;
+    if (filter === "wa") return waPending(p);
+    if (filter === "mail") return mailPending(p);
+    if (filter === "done") return isDone(p);
+    return true;
+  });
+
+  $("count").textContent = list.length + " kayıt" + (pend() ? " (bekleyen filtreleri tarihten bağımsızdır, tüm bekleyenleri gösterir)" : "") + (patients.length >= KAYIT_LIMITI ? " (en yeni " + KAYIT_LIMITI + " kayıt yüklendi)" : "");
+  if (!list.length) {
+    $("list").innerHTML = `<div class="bg-white rounded-xl p-10 text-center text-slate-500">${patients.length ? "Aramanızla eşleşen kayıt yok." : "Seçili tarih aralığında kayıt yok. Tarihi değiştirin veya formdan hasta ekleyin."}</div>`;
+    return;
+  }
+  $("list").innerHTML = list.map(p => `
+    <article class="bg-white rounded-xl shadow-sm ${isDone(p) ? "row-done" : "row-pending"} p-4 grid gap-3 lg:grid-cols-[1.1fr_1.7fr_auto] lg:items-center" data-id="${p.id}">
+      <div class="min-w-0">
+        <h3 class="font-bold text-base truncate">${esc(p.fullName)}</h3>
+        <p class="text-sm text-slate-600 truncate">${esc(p.studyType)} · Dr. ${esc(p.doctorName)}</p>
+        <p class="text-xs text-slate-500 mt-1 truncate">${esc(p.phone || "Telefon yok")} · ${esc(p.email || "E-posta yok")}</p>
+        <p class="text-xs text-slate-400">Kayıt: ${fmt(p.createdAt)}</p>
+      </div>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <div><p class="text-xs text-slate-500 mb-1">Hasta bildirimi</p><div class="flex flex-wrap gap-2">${tg("wa", "WhatsApp", p.whatsappSent)}${tg("mail", "Mail", p.mailSent)}</div></div>
+        <div><p class="text-xs text-slate-500 mb-1">Doktor bildirimi</p><div class="flex flex-wrap gap-2">${tg("dwa", "WhatsApp", p.doctorWhatsappSent)}${tg("dmail", "Mail", p.doctorMailSent)}</div></div>
+      </div>
+      <div class="flex flex-wrap gap-2 lg:justify-end">
+        <button data-act="copy" class="btn px-3 py-1.5 rounded-lg text-sm bg-teal-50 text-teal-700 hover:bg-teal-100 font-medium">PACS linkini kopyala</button>
+        <button data-act="del" class="btn px-3 py-1.5 rounded-lg text-sm bg-red-50 text-red-700 hover:bg-red-100 font-medium">Sil</button>
+      </div>
+    </article>`).join("");
+}
+
+/* ---------- Satır işlemleri ---------- */
+$("list").addEventListener("click", async e => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn || btn.disabled) return;
+  const id = btn.closest("[data-id]").dataset.id;
+  const p = patients.find(x => x.id === id);
+  if (!p) return;
+  try {
+    switch (btn.dataset.act) {
+      case "wa":   await update(ref(db, "patients/" + id), { whatsappSent: !p.whatsappSent }); break;
+      case "mail": await update(ref(db, "patients/" + id), { mailSent: !p.mailSent }); break;
+      case "dwa":  await update(ref(db, "patients/" + id), { doctorWhatsappSent: !p.doctorWhatsappSent }); break;
+      case "dmail": await update(ref(db, "patients/" + id), { doctorMailSent: !p.doctorMailSent }); break;
+      case "copy":
+        if (!p.pacsUrl) return toast("Bu kayıtta PACS linki yok", true);
+        await navigator.clipboard.writeText(p.pacsUrl); toast("PACS linki kopyalandı"); break;
+      case "del":
+        if (confirm(`"${p.fullName}" kaydı kalıcı olarak silinsin mi?`)) { await remove(ref(db, "patients/" + id)); toast("Kayıt silindi"); }
+        break;
+    }
+  } catch (err) { toast("İşlem başarısız: " + err.message, true); }
+});
+
+/* ---------- Form ---------- */
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  if (!configured) return toast("Önce firebaseConfig bilgilerini girin", true);
+  const f = new FormData(e.target), g = k => (f.get(k) || "").toString().trim();
+  const newRef = push(patientsRef);
+  const rec = {
+    id: newRef.key, fullName: g("fullName"), studyType: g("studyType"), doctorName: g("doctorName"),
+    pacsUrl: g("pacsUrl"), phone: g("phone"), email: g("email"),
+    whatsappSent: false, mailSent: false, doctorWhatsappSent: false, doctorMailSent: false, createdAt: serverTimestamp()
+  };
+  try { await set(newRef, rec); e.target.reset(); toast("Hasta kaydedildi"); $("fullName").focus(); }
+  catch (err) { toast("Kayıt başarısız: " + err.message, true); }
+});
+
+/* ---------- Arama & filtre ---------- */
+$("search").addEventListener("input", e => { searchText = e.target.value; render(); });
+document.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", () => {
+  const was = pend(); filter = b.dataset.filter;
+  if (was !== pend()) subscribe();
+  render();
+}));
+document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
+  preset = b.dataset.range; custom = { from: "", to: "" };
+  $("dFrom").value = ""; $("dTo").value = "";
+  subscribe(); render();
+}));
+["dFrom", "dTo"].forEach(id => $(id).addEventListener("change", () => {
+  custom = { from: $("dFrom").value, to: $("dTo").value };
+  if (!custom.from && !custom.to) preset = "today"; else preset = "custom";
+  subscribe(); render();
+}));
+render();
+</script>
+
+<header class="bg-teal-900 text-white">
+  <div class="max-w-6xl mx-auto px-4 py-5 flex flex-wrap items-center justify-between gap-2">
+    <div class="flex items-center gap-3">
+      <svg width="40" height="40" viewBox="0 0 24 24" aria-hidden="true"><path fill="#5eead4" d="M12 2l2.9 6.3 6.9.8-5.1 4.7 1.4 6.8L12 17.2 5.9 20.6l1.4-6.8L2.2 9.1l6.9-.8z"/></svg>
+      <div>
+        <h1 class="text-xl sm:text-2xl font-bold tracking-wide">TESLA STAR RADYOLOJİ MERKEZİ</h1>
+        <p class="text-sm text-teal-100">Hasta, sonuç ve iletişim takip sistemi</p>
+      </div>
+    </div>
+    <div id="live" class="inline-flex items-center gap-2 text-sm text-teal-100"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Bağlantı yok</div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+  <div id="warn" class="hidden bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-3 text-sm">
+    Firebase henüz bağlanmadı. <code>index.html</code> içindeki <code>firebaseConfig</code> alanlarını kendi proje bilgilerinizle doldurun.
+  </div>
+
+  <section class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <div class="bg-white rounded-xl p-4 shadow-sm"><p class="text-sm text-slate-500">Toplam kayıt</p><p id="kTotal" class="text-3xl font-bold mt-1">0</p></div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-400"><p class="text-sm text-slate-500">WhatsApp bekleyen</p><p id="kWa" class="text-3xl font-bold mt-1 text-amber-600">0</p></div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-400"><p class="text-sm text-slate-500">Mail bekleyen</p><p id="kMail" class="text-3xl font-bold mt-1 text-amber-600">0</p></div>
+    <div class="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-500"><p class="text-sm text-slate-500">Tamamlanan</p><p id="kDone" class="text-3xl font-bold mt-1 text-emerald-600">0</p></div>
+  </section>
+
+  <section class="bg-white rounded-xl shadow-sm p-4 sm:p-5">
+    <h2 class="font-bold text-lg mb-3">Yeni hasta ekle</h2>
+    <form id="form" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <label class="text-sm font-medium">Hasta adı soyadı
+        <input id="fullName" name="fullName" required class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-teal-500"></label>
+      <label class="text-sm font-medium">Çekim / tetkik adı
+        <input name="studyType" required placeholder="Toraks BT, Bel MR..." class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+      <label class="text-sm font-medium">İsteyen doktor
+        <input name="doctorName" required class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+      <label class="text-sm font-medium">PACS linki
+        <input name="pacsUrl" type="url" placeholder="https://" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+      <label class="text-sm font-medium">Telefon (isteğe bağlı)
+        <input name="phone" type="tel" placeholder="05xx xxx xx xx" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+      <label class="text-sm font-medium">E-posta (isteğe bağlı)
+        <input name="email" type="email" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+      <div class="sm:col-span-2 lg:col-span-3">
+        <button class="btn bg-teal-700 hover:bg-teal-900 text-white font-semibold rounded-lg px-5 py-2.5">Hastayı kaydet</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="space-y-3">
+    <div class="bg-white rounded-xl shadow-sm p-3 flex flex-wrap items-center gap-2">
+      <span class="text-sm font-semibold mr-1">Tarih</span>
+      <button data-range="today">Bugün</button>
+      <button data-range="yesterday">Dün</button>
+      <button data-range="week">Son 7 gün</button>
+      <button data-range="month">Bu ay</button>
+      <button data-range="all">Tümü</button>
+      <span class="hidden sm:inline mx-1 text-slate-300">|</span>
+      <label class="text-sm flex items-center gap-1">Başlangıç <input id="dFrom" type="date" class="rounded-lg border border-slate-300 px-2 py-1"></label>
+      <label class="text-sm flex items-center gap-1">Bitiş <input id="dTo" type="date" class="rounded-lg border border-slate-300 px-2 py-1"></label>
+    </div>
+    <div class="flex flex-wrap items-center gap-3">
+      <input id="search" type="search" placeholder="Hasta, doktor veya tetkik ara" class="flex-1 min-w-[220px] rounded-lg border border-slate-300 bg-white px-3 py-2" aria-label="Ara">
+      <div class="flex flex-wrap gap-2">
+        <button data-filter="all">Tümü</button>
+        <button data-filter="wa">WhatsApp bekleyenler</button>
+        <button data-filter="mail">Mail bekleyenler</button>
+        <button data-filter="done">Tamamlananlar</button>
+      </div>
+    </div>
+    <p id="count" class="text-sm text-slate-500"></p>
+    <div id="list" class="space-y-3"></div>
+  </section>
+</main>
+
+<div id="toast" class="hidden" role="status"></div>
+</body>
+</html>
