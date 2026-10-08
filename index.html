@@ -15,13 +15,16 @@
 </script>
 <style>
   body{background:#f3f7f7}
+  #login{display:none}
+  body.locked #login{display:flex}
+  body.locked header, body.locked main{display:none}
   .row-pending{border-left:4px solid #f59e0b}
   .row-done{border-left:4px solid #16a34a}
   .btn{transition:background .15s,color .15s}
   :focus-visible{outline:2px solid #1a8f89;outline-offset:2px}
 </style>
 </head>
-<body class="font-sans text-ink">
+<body class="font-sans text-ink locked">
 
 <script type="module">
 /* ==========================================================
@@ -41,18 +44,24 @@ const firebaseConfig = {
 /* ========================================================== */
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, push, set, update, remove, onValue, serverTimestamp, query, orderByKey, orderByChild, startAt, endAt, limitToLast }
+import { getDatabase, ref, push, set, update, remove, onValue, serverTimestamp, query, orderByKey, orderByChild, startAt, endAt, limitToLast, get }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const configured = !firebaseConfig.apiKey.startsWith("BURAYA");
-let db, patientsRef;
+let db, auth, patientsRef;
 if (configured) {
-  db = getDatabase(initializeApp(firebaseConfig));
+  const app = initializeApp(firebaseConfig);
+  db = getDatabase(app);
+  auth = getAuth(app);
   patientsRef = ref(db, "patients");
 }
 
 /* Ekrana yüklenecek en yeni kayıt sayısı (indirme kotasını korur). İsterseniz artırabilirsiniz. */
 const KAYIT_LIMITI = 2000;
+/* Kullanıcı adı "admin" yazılırsa giriş e-postası admin@ + bu alan adı olur (Firebase > Authentication'da böyle oluşturun). */
+const KULLANICI_ALAN_ADI = "tesla-star.app";
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -68,6 +77,8 @@ function toast(msg, bad) {
 
 /* ---------- Canlı dinleyici ---------- */
 let unsub = null, dayKey = new Date().toDateString();
+let role = null; // "admin" | "viewer"
+const canEdit = () => role === "admin";
 let preset = "today", custom = { from: "", to: "" };
 const DAY = 86400000;
 const day0 = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -93,7 +104,7 @@ const inRange = p => { const r = getRange(); return !r || (p.createdAt >= r[0] &
 
 /* Seçili tarih aralığını (veya bekleyen/tümü modunda en yeni kayıtları) Firebase'den canlı dinler */
 function subscribe() {
-  if (!configured) return;
+  if (!configured || !role) return;
   if (unsub) unsub();
   const r = getRange();
   const q = (!r || pend())
@@ -113,21 +124,61 @@ function subscribe() {
 }
 
 if (configured) {
-  subscribe();
-  setInterval(() => { const k = new Date().toDateString(); if (k !== dayKey) { dayKey = k; subscribe(); render(); } }, 60000);
+  setInterval(() => { const k = new Date().toDateString(); if (k !== dayKey) { dayKey = k; if (role) { subscribe(); render(); } } }, 60000);
   setTimeout(() => {
-    if (!$("live").textContent.includes("Canlı") && !$("live").textContent.includes("Hata"))
+    if (role && !$("live").textContent.includes("Canlı") && !$("live").textContent.includes("Hata"))
       $("live").textContent = "Bağlanılamıyor: internet, reklam engelleyici veya Firebase ayarlarını kontrol edin (F12 → Console)";
   }, 8000);
 } else {
   $("warn").classList.remove("hidden");
 }
 
+/* ---------- Giriş & yetki ---------- */
+if (configured) {
+  $("loginForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const u = $("lUser").value.trim().toLowerCase();
+    const email = u.includes("@") ? u : u + "@" + KULLANICI_ALAN_ADI;
+    $("lErr").textContent = ""; $("lBtn").disabled = true;
+    try { await signInWithEmailAndPassword(auth, email, $("lPass").value); }
+    catch { $("lErr").textContent = "Kullanıcı adı veya şifre hatalı."; }
+    $("lBtn").disabled = false;
+  });
+  $("logout").addEventListener("click", () => signOut(auth));
+
+  onAuthStateChanged(auth, async user => {
+    if (unsub) { unsub(); unsub = null; }
+    patients = []; role = null;
+    if (!user) { $("lPass").value = ""; document.body.classList.add("locked"); return; }
+    try {
+      const r = (await get(ref(db, "roles/" + user.uid))).val();
+      if (r !== "admin" && r !== "viewer") {
+        $("lErr").textContent = "Bu hesaba yetki tanımlanmamış. Yöneticiyle görüşün.";
+        await signOut(auth); return;
+      }
+      role = r;
+    } catch (err) {
+      $("lErr").textContent = "Yetki okunamadı: " + err.message;
+      await signOut(auth); return;
+    }
+    $("who").textContent = user.email.split("@")[0] + " (" + (role === "admin" ? "Yönetici" : "Görüntüleyici") + ")";
+    $("formSec").classList.toggle("hidden", role !== "admin");
+    document.body.classList.remove("locked");
+    subscribe(); render();
+  });
+}
+
 /* ---------- Render ---------- */
 const isDone = p => p.whatsappSent && p.mailSent && p.doctorWhatsappSent && p.doctorMailSent;
 const waPending = p => !p.whatsappSent || !p.doctorWhatsappSent;
 const mailPending = p => !p.mailSent || !p.doctorMailSent;
-const tg = (act, label, on) => `<button data-act="${act}" class="btn px-3 py-1.5 rounded-lg text-sm font-semibold ${on ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200" : "bg-amber-100 text-amber-800 hover:bg-amber-200"}">${label}: ${on ? "Gönderildi" : "Bekliyor"}</button>`;
+const tg = (act, label, on) => {
+  const cls = "btn px-3 py-1.5 rounded-lg text-sm font-semibold " + (on ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800");
+  const txt = label + ": " + (on ? "Gönderildi" : "Bekliyor");
+  return canEdit()
+    ? `<button data-act="${act}" class="${cls} ${on ? "hover:bg-emerald-200" : "hover:bg-amber-200"}">${txt}</button>`
+    : `<span class="${cls} inline-block cursor-default">${txt}</span>`;
+};
 function render() {
   const scope = patients.filter(inRange);
   $("kTotal").textContent = scope.length;
@@ -176,7 +227,7 @@ function render() {
       </div>
       <div class="flex flex-wrap gap-2 lg:justify-end">
         <button data-act="copy" class="btn px-3 py-1.5 rounded-lg text-sm bg-teal-50 text-teal-700 hover:bg-teal-100 font-medium">PACS linkini kopyala</button>
-        <button data-act="del" class="btn px-3 py-1.5 rounded-lg text-sm bg-red-50 text-red-700 hover:bg-red-100 font-medium">Sil</button>
+        ${canEdit() ? '<button data-act="del" class="btn px-3 py-1.5 rounded-lg text-sm bg-red-50 text-red-700 hover:bg-red-100 font-medium">Sil</button>' : ""}
       </div>
     </article>`).join("");
 }
@@ -188,6 +239,7 @@ $("list").addEventListener("click", async e => {
   const id = btn.closest("[data-id]").dataset.id;
   const p = patients.find(x => x.id === id);
   if (!p) return;
+  if (!canEdit() && btn.dataset.act !== "copy") return;
   try {
     switch (btn.dataset.act) {
       case "wa":   await update(ref(db, "patients/" + id), { whatsappSent: !p.whatsappSent }); break;
@@ -208,6 +260,7 @@ $("list").addEventListener("click", async e => {
 $("form").addEventListener("submit", async e => {
   e.preventDefault();
   if (!configured) return toast("Önce firebaseConfig bilgilerini girin", true);
+  if (!canEdit()) return toast("Bu hesabın düzenleme yetkisi yok", true);
   const f = new FormData(e.target), g = k => (f.get(k) || "").toString().trim();
   const newRef = push(patientsRef);
   const rec = {
@@ -248,7 +301,11 @@ render();
         <p class="text-sm text-teal-100">Hasta, sonuç ve iletişim takip sistemi</p>
       </div>
     </div>
-    <div id="live" class="inline-flex items-center gap-2 text-sm text-teal-100"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Bağlantı yok</div>
+    <div class="flex flex-wrap items-center gap-3">
+      <div id="live" class="inline-flex items-center gap-2 text-sm text-teal-100"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Bağlantı yok</div>
+      <span id="who" class="text-sm text-teal-100"></span>
+      <button id="logout" class="btn px-3 py-1.5 rounded-lg text-sm bg-teal-700 hover:bg-teal-600 text-white font-medium">Çıkış</button>
+    </div>
   </div>
 </header>
 
@@ -264,7 +321,7 @@ render();
     <div class="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-500"><p class="text-sm text-slate-500">Tamamlanan</p><p id="kDone" class="text-3xl font-bold mt-1 text-emerald-600">0</p></div>
   </section>
 
-  <section class="bg-white rounded-xl shadow-sm p-4 sm:p-5">
+  <section id="formSec" class="bg-white rounded-xl shadow-sm p-4 sm:p-5">
     <h2 class="font-bold text-lg mb-3">Yeni hasta ekle</h2>
     <form id="form" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       <label class="text-sm font-medium">Hasta adı soyadı
@@ -310,6 +367,22 @@ render();
     <div id="list" class="space-y-3"></div>
   </section>
 </main>
+
+<div id="login" class="fixed inset-0 z-40 items-center justify-center bg-teal-900 p-4">
+  <form id="loginForm" class="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 space-y-4">
+    <div class="text-center">
+      <svg class="mx-auto" width="44" height="44" viewBox="0 0 24 24" aria-hidden="true"><path fill="#12746f" d="M12 2l2.9 6.3 6.9.8-5.1 4.7 1.4 6.8L12 17.2 5.9 20.6l1.4-6.8L2.2 9.1l6.9-.8z"/></svg>
+      <h1 class="font-bold text-lg tracking-wide mt-1">TESLA STAR RADYOLOJİ MERKEZİ</h1>
+      <p class="text-sm text-slate-500">Devam etmek için giriş yapın</p>
+    </div>
+    <label class="block text-sm font-medium">Kullanıcı adı
+      <input id="lUser" required autocomplete="username" autocapitalize="none" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+    <label class="block text-sm font-medium">Şifre
+      <input id="lPass" type="password" required autocomplete="current-password" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"></label>
+    <p id="lErr" class="text-sm text-red-600 min-h-[1.25rem]" role="alert"></p>
+    <button id="lBtn" class="btn w-full bg-teal-700 hover:bg-teal-900 text-white font-semibold rounded-lg py-2.5">Giriş yap</button>
+  </form>
+</div>
 
 <div id="toast" class="hidden" role="status"></div>
 </body>
